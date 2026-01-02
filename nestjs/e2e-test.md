@@ -16,6 +16,152 @@ test/modules/user/
 
 ## Test File Structures
 
+### Setup Test Application, create if not exists
+
+```typescript
+import { Test, TestingModule } from '@nestjs/testing';
+import {
+  INestApplication,
+  ExecutionContext,
+  ValidationPipe,
+} from '@nestjs/common';
+import { EventBus } from '@nestjs/cqrs';
+import { PrismaService } from '../src/modules/prisma/prisma.service';
+import { AppModule } from '../src/modules/app/app.module';
+import { JwtAuthGuard } from '../src/modules/auth/auth.jwt.guard';
+
+export interface ITestContext {
+  app: INestApplication;
+  module: TestingModule;
+  prisma: PrismaService;
+  testUser?: any;
+  mockAuthGuard?: any;
+  generateJwtToken: (payload: {
+    userId: number;
+    businessId: number;
+    email: string;
+  }) => string;
+}
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace NodeJS {
+    interface Global {
+      testContext: ITestContext;
+    }
+  }
+}
+
+beforeAll(async () => {
+  // Create a mock auth guard instance with a canActivate method that can be spied on
+  const mockAuthGuard = {
+    canActivate: jest.fn().mockImplementation((context: ExecutionContext) => {
+      const request = context.switchToHttp().getRequest();
+      // Set a default test user that can be overridden by individual tests
+      request.user = {
+        userId: 1,
+        email: 'test@example.com',
+        businessId: 1,
+        roleId: 1,
+        isActive: true,
+      };
+      return true;
+    }),
+  };
+
+  const moduleFixture: TestingModule = await Test.createTestingModule({
+    imports: [AppModule],
+  })
+    .overrideGuard(JwtAuthGuard)
+    .useValue(mockAuthGuard)
+    .compile();
+
+  const testApp: INestApplication = moduleFixture.createNestApplication();
+
+  // Apply the same global pipes as in main.ts
+  testApp.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      transformOptions: {
+        enableImplicitConversion: true,
+      },
+    }),
+  );
+
+  await testApp.init();
+
+  const testPrisma: PrismaService = testApp.get(PrismaService);
+
+  // Clear database to ensure clean state
+  await testPrisma.userRole.deleteMany({});
+  await testPrisma.user.deleteMany({});
+
+  // Ensure base role exists
+  await testPrisma.role.upsert({
+    where: { roleId: 1 },
+    update: {},
+    create: {
+      roleId: 1,
+      roleName: 'test-user',
+    },
+  });
+
+  // Create base test user for authentication
+  const testUser = await testPrisma.user.create({
+    data: {
+      email: 'test@example.com',
+      passwordHash: 'hashed_password',
+      isActive: true,
+      userRoles: {
+        create: {
+          roleId: 1, // Assume role 1 exists or will be created
+        },
+      },
+    },
+  });
+  console.log('Created test user with ID:', testUser.userId);
+
+  global.testContext = {
+    app: testApp,
+    module: moduleFixture,
+    prisma: testPrisma,
+    testUser, // Store the test user for reference
+    mockAuthGuard, // Store the mock auth guard for individual test customization
+    generateJwtToken: ({}) => {
+      // For tests, we just return a mock token since the JWT strategy is mocked
+      return 'mock-jwt-token';
+    },
+  };
+
+  console.log('✅ Test setup completed');
+}, 30000);
+
+afterAll(async () => {
+  if (global.testContext) {
+    try {
+      // Disconnect Prisma
+      await global.testContext.prisma.$disconnect();
+
+      // Close the NestJS application
+      await global.testContext.app.close();
+
+      console.log('✅ Test cleanup completed');
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
+  }
+}, 10000);
+
+beforeEach(async () => {
+  if (global.testContext) {
+    const eventBus = global.testContext.app.get(EventBus);
+    jest.spyOn(eventBus, 'publish').mockImplementation(() => {});
+  }
+});
+
+```
+
 ### API Test
 
 ```typescript
